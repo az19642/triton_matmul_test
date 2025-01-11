@@ -3,55 +3,6 @@ import triton
 import triton.language as tl
 
 
-def get_autotune_config():
-    return [
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64},
-            num_stages=3,
-            num_warps=8,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=5,
-            num_warps=2,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=5,
-            num_warps=2,
-        ),
-    ]
-
-
-@triton.autotune(
-    configs=get_autotune_config(),
-    key=["K"],
-)
 @triton.jit
 def matmul_kernel(
     a_ptr,
@@ -66,10 +17,10 @@ def matmul_kernel(
     stride_bn,
     stride_cm,
     stride_cn,
-    GROUP_SIZE_M: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
 ):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
@@ -106,7 +57,7 @@ def matmul_kernel(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
-def matmul(a, b, GSM):
+def matmul(a, b, BSM, BSN, BSK, GSM):
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     assert a.is_contiguous(), "Matrix A must be contiguous"
     M, K = a.shape
@@ -129,6 +80,9 @@ def matmul(a, b, GSM):
         b.stride(1),
         c.stride(0),
         c.stride(1),
+        BSM,
+        BSN,
+        BSK,
         GSM,
     )
     return c
@@ -143,25 +97,31 @@ configs = [
         line_names=["cuBLAS", "Triton"],
         styles=[("green", "-"), ("blue", "-")],
         ylabel="Time (ms)",
-        plot_name=f"matmul-performance-fp16-{GSM}",
+        plot_name=f"matmul-performance-fp16-{BSM}-{BSN}-{BSK}-{GSM}",
         args={
             "M": 8192,
             "N": 8192,
+            "BSM": BSM,
+            "BSN": BSN,
+            "BSK": BSK,
             "GSM": GSM,
         },
     )
-    for GSM in [2**i for i in range(10)]
+    for BSM in [64, 128]
+    for BSN in [64, 128]
+    for BSK in [64, 128]
+    for GSM in [4, 8, 16]
 ]
 
 
 @triton.testing.perf_report(configs)
-def benchmark(M, N, K, provider, GSM):
+def benchmark(M, N, K, provider, BSM, BSN, BSK, GSM):
     a = torch.randn((M, K), device="cuda", dtype=torch.float16)
     b = torch.randn((K, N), device="cuda", dtype=torch.float16)
     if provider == "cublas":
         ms = triton.testing.do_bench(lambda: torch.matmul(a, b))
-    elif provider == "triton":
-        ms = triton.testing.do_bench(lambda: matmul(a, b, GSM))
+    if provider == "triton":
+        ms = triton.testing.do_bench(lambda: matmul(a, b, BSM, BSN, BSK, GSM))
 
     return ms
 
